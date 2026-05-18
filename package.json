@@ -1,14 +1,11 @@
 {
   "name": "ivasms-api",
-  "version": "2.0.0",
-  "description": "IVASMS scraper API with Cloudflare bypass (cloudscraper)",
-  "main": "server.js",
-  "scripts": {
-    "start": "node server.js"
-  },
+  "version": "3.0.0",
+  "scripts": { "start": "node server.js" },
   "dependencies": {
     "express": "^4.18.2",
-    "cloudscraper": "^4.6.0",
-    "tough-cookie": "^4.1.3"
+    "puppeteer": "^21.0.0",
+    "puppeteer-extra": "^3.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2"
   }
 }
