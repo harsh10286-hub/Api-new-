@@ -47,7 +47,6 @@ function loadCookieJar() {
       console.log("[IVAS] Cookie jar loaded from disk");
     } else {
       console.log("[IVAS] No existing cookie jar, injecting your cookies");
-      // Inject your cookies into the jar
       MY_COOKIES.forEach(cookieData => {
         const cookie = new tough.Cookie({
           key: cookieData.name,
@@ -60,7 +59,7 @@ function loadCookieJar() {
         });
         cookieJar.setCookieSync(cookie, BASE_URL);
       });
-      saveCookieJar(); // persist to disk for future runs
+      saveCookieJar();
       console.log("[IVAS] Your cookies injected and saved");
     }
   } catch (err) {
@@ -79,10 +78,8 @@ function saveCookieJar() {
   }
 }
 
-// Call on startup
 loadCookieJar();
 
-// Helper to update cookie jar after cloudscraper request
 function updateCookieJarFromResponse(response) {
   if (response && response.headers && response.headers['set-cookie']) {
     const setCookies = response.headers['set-cookie'];
@@ -113,10 +110,10 @@ async function makeRequest(method, path, body, contentType, extraHeaders = {}) {
     method: method,
     uri: url,
     headers: headers,
-    jar: cookieJar,               // persists cookies across requests
+    jar: cookieJar,
     followRedirect: true,
-    gzip: true,                   // auto decompress
-    resolveWithFullResponse: true // to get headers for cookie updates
+    gzip: true,
+    resolveWithFullResponse: true
   };
 
   if (method === "POST" && body) {
@@ -126,19 +123,16 @@ async function makeRequest(method, path, body, contentType, extraHeaders = {}) {
 
   try {
     const response = await cloudscraper(options);
-    // Update cookie jar from response headers
     updateCookieJarFromResponse(response);
-    // Check for session expiration (Cloudflare success returns normal page)
     const bodyText = response.body;
     if (response.statusCode === 401 || response.statusCode === 419 ||
         bodyText.includes('"message":"Unauthenticated"') ||
-        bodyText.includes('Ray ID') && bodyText.includes('cf-browser-verification')) {
+        (bodyText.includes('Ray ID') && bodyText.includes('cf-browser-verification'))) {
       throw new Error("SESSION_EXPIRED");
     }
     return { status: response.statusCode, body: bodyText };
   } catch (err) {
     if (err.message === "SESSION_EXPIRED") throw err;
-    // Cloudflare challenge page or other error
     if (err.message.includes("Cloudflare") || (err.response && err.response.body && err.response.body.includes("cf-browser-verification"))) {
       throw new Error("CLOUDFLARE_BLOCKED");
     }
@@ -157,7 +151,6 @@ function safeJSON(text) {
   catch { return { error: "Invalid JSON", preview: text.substring(0, 300) }; }
 }
 
-/* ================= FETCH _token FROM PORTAL ================= */
 async function fetchToken() {
   const resp = await makeRequest("GET", "/portal", null, null, {
     "Accept": "text/html,application/xhtml+xml,*/*"
@@ -167,7 +160,6 @@ async function fetchToken() {
   return match ? match[1] : null;
 }
 
-/* ================= PARSE SMS MESSAGES ================= */
 function parseSMSMessages(html, range, number, date) {
   const rows = [];
   const clean = t => (t || "")
@@ -193,7 +185,6 @@ function parseSMSMessages(html, range, number, date) {
   return rows;
 }
 
-/* ================= GET NUMBERS ================= */
 async function getNumbers(token) {
   const ts = Date.now();
   const path = `/portal/numbers?draw=1`
@@ -231,7 +222,6 @@ async function getNumbers(token) {
   };
 }
 
-/* ================= GET SMS (multi-step) ================= */
 async function getSMS(token) {
   const today = getToday();
   const boundary = "----WebKitFormBoundary6I2Js7TBhcJuwIqw";
@@ -244,7 +234,6 @@ async function getSMS(token) {
     `--${boundary}--`
   ].join("\r\n");
 
-  // Step 1: Get ranges
   const r1 = await makeRequest(
     "POST", "/portal/sms/received/getsms", parts,
     `multipart/form-data; boundary=${boundary}`,
@@ -320,7 +309,6 @@ router.get("/", async (req, res) => {
   }
 });
 
-// Raw debug endpoint (optional, uses same makeRequest)
 router.get("/raw-sms", async (req, res) => {
   try {
     const token = await fetchToken();
@@ -351,17 +339,14 @@ router.get("/raw-sms", async (req, res) => {
     const r3 = await makeRequest("POST", "/portal/sms/received/getsms/number/sms",
       new URLSearchParams({ _token: token, start: today, end: today, Number: number, Range: range }).toString(),
       "application/x-www-form-urlencoded",
-      { "Referer": `${BASE_URL}/portal/sms/received`, "Accept": "text/html, */*; q=0.01`, "User-Agent": ua }
+      { "Referer": `${BASE_URL}/portal/sms/received`, "Accept": "text/html, */*; q=0.01", "User-Agent": ua }
     );
     res.set("Content-Type", "text/plain");
     res.send(`Range: ${range}\nNumber: ${number}\n\n` + r3.body.substring(0, 5000));
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// Manual cookie update endpoint – now just triggers a save (cloudscraper manages cookies automatically)
 router.post("/update-session", express.json(), async (req, res) => {
-  // Because cloudscraper uses its own jar, we can optionally force a fresh login by clearing jar and making a request.
-  // But for simplicity, we'll just try to fetch token to validate.
   try {
     const token = await fetchToken();
     if (token) {
@@ -374,7 +359,6 @@ router.post("/update-session", express.json(), async (req, res) => {
   }
 });
 
-// Status endpoint
 router.get("/status", async (req, res) => {
   try {
     const token = await fetchToken();
