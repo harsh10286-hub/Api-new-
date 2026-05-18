@@ -1,64 +1,148 @@
 const express = require("express");
-const https   = require("https");
-const zlib    = require("zlib");
-const fs      = require("fs");
-const path    = require("path");
+const cloudscraper = require("cloudscraper");
+const tough = require("tough-cookie");
+const fs = require("fs");
+const path = require("path");
 
 const router = express.Router();
 
 /* ================= CONFIG ================= */
-const BASE_URL       = "https://www.ivasms.com";
-const USER_AGENT     = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36";
+const BASE_URL = "https://www.ivasms.com";
+const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36";
 
-// Persistent cookie file path (Railway volume)
-const COOKIE_FILE = process.env.COOKIE_FILE_PATH || "/data/cookies.json";
+// Persistent cookie jar file (Railway volume)
+const COOKIE_JAR_FILE = process.env.COOKIE_JAR_PATH || "/data/cookies.json";
 
-// In-memory cookie object
-let COOKIES = {};
+// Global cookie jar (persists across requests)
+let cookieJar = new tough.CookieJar();
 
-// ---------- Load / Save cookies to disk ----------
-function loadCookies() {
+// ---------- Your cookies (from browser) ----------
+const MY_COOKIES = [
+  {
+    name: "XSRF-TOKEN",
+    value: "eyJpdiI6IjJaSHh6SVA4WDV0NTRJbWZRRnFtQlE9PSIsInZhbHVlIjoiWnc0eGhjTWFFQTVsbkVyYkF4a3RESDU2WVRXYnVydFBiTDVvOVRPTHZCdEU4Rm1peTk3SGVFUHVpbE1mVGN5SXFsNFNPeEJoZklSYTNYd2VxR1djUjJYeExKUElKUSs2MFhaUE4zSnFXNnkyQkhYQUhCYTRVeDIvOGpjWVpBOGoiLCJtYWMiOiJmYWRjYzY5MDBjNmM4NmM3YWYzMWNlNDJlMDAyMGRhOGVjNDk4YzE1MWY5YzhlOWU4YjVkOTk3M2MyMjgyOTZhIiwidGFnIjoiIn0%3D",
+    domain: "www.ivasms.com",
+    path: "/",
+    httpOnly: false,
+    secure: false,
+    sameSite: "lax"
+  },
+  {
+    name: "ivas_sms_session",
+    value: "eyJpdiI6IiszbjJjTGxpWkRESkJES1BacmhyRnc9PSIsInZhbHVlIjoiV2JkM2h6T1JmOFNlQVNsRzNDZEFIL2JpdUIxNC9JZ2hsZEc0SDZmcGJ1S2tGU241ZDVPQWwvUXVnSW9vZmttSWRtdmdCV1hycFF6WVQ5Ulh2am84MGl2MEQvNWxXdHBnckhtSURMUlprUVN2VElTTHQvN20wdjJyNzVOQWhUdkQiLCJtYWMiOiJhMDhmZDhiOTM0M2ExZTE1NTk5NmIwZDYwM2Q0MDY5ZDc2NjVmYTc5NDEzN2I0MTE1MjY4N2YyNzMwYWYwZTdhIiwidGFnIjoiIn0%3D",
+    domain: "www.ivasms.com",
+    path: "/",
+    httpOnly: true,
+    secure: false,
+    sameSite: "lax"
+  }
+];
+
+// ---------- Load / Save cookie jar to disk ----------
+function loadCookieJar() {
   try {
-    if (fs.existsSync(COOKIE_FILE)) {
-      const data = fs.readFileSync(COOKIE_FILE, 'utf8');
-      COOKIES = JSON.parse(data);
-      console.log("[IVAS] Cookies loaded from disk");
+    if (fs.existsSync(COOKIE_JAR_FILE)) {
+      const serialized = fs.readFileSync(COOKIE_JAR_FILE, 'utf8');
+      cookieJar = tough.CookieJar.fromJSON(serialized);
+      console.log("[IVAS] Cookie jar loaded from disk");
     } else {
-      // Fallback to environment variables or hardcoded defaults
-      COOKIES = {
-        "XSRF-TOKEN":       process.env.INITIAL_XSRF_TOKEN || "eyJpdiI6IjJaSHh6SVA4WDV0NTRJbWZRRnFtQlE9PSIsInZhbHVlIjoiWnc0eGhjTWFFQTVsbkVyYkF4a3RESDU2WVRXYnVydFBiTDVvOVRPTHZCdEU4Rm1peTk3SGVFUHVpbE1mVGN5SXFsNFNPeEJoZklSYTNYd2VxR1djUjJYeExKUElKUSs2MFhaUE4zSnFXNnkyQkhYQUhCYTRVeDIvOGpjWVpBOGoiLCJtYWMiOiJmYWRjYzY5MDBjNmM4NmM3YWYzMWNlNDJlMDAyMGRhOGVjNDk4YzE1MWY5YzhlOWU4YjVkOTk3M2MyMjgyOTZhIiwidGFnIjoiIn0%3D",
-        "ivas_sms_session": process.env.INITIAL_SESSION_COOKIE || "eyJpdiI6IiszbjJjTGxpWkRESkJES1BacmhyRnc9PSIsInZhbHVlIjoiV2JkM2h6T1JmOFNlQVNsRzNDZEFIL2JpdUIxNC9JZ2hsZEc0SDZmcGJ1S2tGU241ZDVPQWwvUXVnSW9vZmttSWRtdmdCV1hycFF6WVQ5Ulh2am84MGl2MEQvNWxXdHBnckhtSURMUlprUVN2VElTTHQvN20wdjJyNzVOQWhUdkQiLCJtYWMiOiJhMDhmZDhiOTM0M2ExZTE1NTk5NmIwZDYwM2Q0MDY5ZDc2NjVmYTc5NDEzN2I0MTE1MjY4N2YyNzMwYWYwZTdhIiwidGFnIjoiIn0%3D"
-      };
-      console.log("[IVAS] Using fallback cookies (env or hardcoded)");
-      saveCookies(); // create file for future runs
+      console.log("[IVAS] No existing cookie jar, injecting your cookies");
+      // Inject your cookies into the jar
+      MY_COOKIES.forEach(cookieData => {
+        const cookie = new tough.Cookie({
+          key: cookieData.name,
+          value: cookieData.value,
+          domain: cookieData.domain,
+          path: cookieData.path,
+          httpOnly: cookieData.httpOnly,
+          secure: cookieData.secure,
+          sameSite: cookieData.sameSite === "lax" ? "lax" : (cookieData.sameSite === "strict" ? "strict" : "none")
+        });
+        cookieJar.setCookieSync(cookie, BASE_URL);
+      });
+      saveCookieJar(); // persist to disk for future runs
+      console.log("[IVAS] Your cookies injected and saved");
     }
   } catch (err) {
-    console.error("[IVAS] Failed to load cookies:", err.message);
+    console.error("[IVAS] Failed to load cookie jar:", err.message);
   }
 }
 
-function saveCookies() {
+function saveCookieJar() {
   try {
-    // Ensure directory exists
-    const dir = path.dirname(COOKIE_FILE);
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-    }
-    fs.writeFileSync(COOKIE_FILE, JSON.stringify(COOKIES, null, 2), 'utf8');
-    console.log("[IVAS] Cookies saved to disk");
+    const dir = path.dirname(COOKIE_JAR_FILE);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(COOKIE_JAR_FILE, JSON.stringify(cookieJar.toJSON()), 'utf8');
+    console.log("[IVAS] Cookie jar saved to disk");
   } catch (err) {
-    console.error("[IVAS] Failed to save cookies:", err.message);
+    console.error("[IVAS] Failed to save cookie jar:", err.message);
   }
 }
 
 // Call on startup
-loadCookies();
+loadCookieJar();
 
-// Helper to update cookies (both memory + disk)
-function updateCookie(key, value) {
-  if (key === "XSRF-TOKEN" || key === "ivas_sms_session") {
-    COOKIES[key] = value;
-    saveCookies();
+// Helper to update cookie jar after cloudscraper request
+function updateCookieJarFromResponse(response) {
+  if (response && response.headers && response.headers['set-cookie']) {
+    const setCookies = response.headers['set-cookie'];
+    setCookies.forEach(cookieStr => {
+      try {
+        const cookie = tough.Cookie.parse(cookieStr);
+        if (cookie) {
+          cookieJar.setCookieSync(cookie, BASE_URL);
+        }
+      } catch (e) {}
+    });
+    saveCookieJar();
+  }
+}
+
+/* ================= HTTP REQUEST using cloudscraper ================= */
+async function makeRequest(method, path, body, contentType, extraHeaders = {}) {
+  const url = BASE_URL + path;
+  const headers = {
+    "User-Agent": USER_AGENT,
+    "Accept": "*/*",
+    "Accept-Language": "en-PK,en;q=0.9",
+    "Referer": `${BASE_URL}/portal`,
+    ...extraHeaders
+  };
+
+  const options = {
+    method: method,
+    uri: url,
+    headers: headers,
+    jar: cookieJar,               // persists cookies across requests
+    followRedirect: true,
+    gzip: true,                   // auto decompress
+    resolveWithFullResponse: true // to get headers for cookie updates
+  };
+
+  if (method === "POST" && body) {
+    options.body = body;
+    options.headers["Content-Type"] = contentType;
+  }
+
+  try {
+    const response = await cloudscraper(options);
+    // Update cookie jar from response headers
+    updateCookieJarFromResponse(response);
+    // Check for session expiration (Cloudflare success returns normal page)
+    const bodyText = response.body;
+    if (response.statusCode === 401 || response.statusCode === 419 ||
+        bodyText.includes('"message":"Unauthenticated"') ||
+        bodyText.includes('Ray ID') && bodyText.includes('cf-browser-verification')) {
+      throw new Error("SESSION_EXPIRED");
+    }
+    return { status: response.statusCode, body: bodyText };
+  } catch (err) {
+    if (err.message === "SESSION_EXPIRED") throw err;
+    // Cloudflare challenge page or other error
+    if (err.message.includes("Cloudflare") || (err.response && err.response.body && err.response.body.includes("cf-browser-verification"))) {
+      throw new Error("CLOUDFLARE_BLOCKED");
+    }
+    throw err;
   }
 }
 
@@ -68,83 +152,9 @@ function getToday() {
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
 }
 
-function cookieString() {
-  return Object.entries(COOKIES).map(([k,v]) => `${k}=${v}`).join("; ");
-}
-
-function getXsrf() {
-  try { return decodeURIComponent(COOKIES["XSRF-TOKEN"] || ""); }
-  catch { return COOKIES["XSRF-TOKEN"] || ""; }
-}
-
 function safeJSON(text) {
   try { return JSON.parse(text); }
   catch { return { error: "Invalid JSON", preview: text.substring(0, 300) }; }
-}
-
-/* ================= HTTP REQUEST ================= */
-function makeRequest(method, path, body, contentType, extraHeaders = {}) {
-  return new Promise((resolve, reject) => {
-    const headers = {
-      "User-Agent":       USER_AGENT,
-      "Accept":           "*/*",
-      "Accept-Encoding":  "gzip, deflate, br",
-      "Accept-Language":  "en-PK,en;q=0.9",
-      "Cookie":           cookieString(),
-      "X-Requested-With": "XMLHttpRequest",
-      "X-XSRF-TOKEN":     getXsrf(),
-      "X-CSRF-TOKEN":     getXsrf(),
-      "Origin":           BASE_URL,
-      "Referer":          `${BASE_URL}/portal`,
-      ...extraHeaders
-    };
-
-    if (method === "POST" && body) {
-      headers["Content-Type"]   = contentType;
-      headers["Content-Length"] = Buffer.byteLength(body);
-    }
-
-    const req = https.request(BASE_URL + path, { method, headers }, res => {
-      // Auto-update cookies from response (and persist)
-      if (res.headers["set-cookie"]) {
-        res.headers["set-cookie"].forEach(c => {
-          const sc = c.split(";")[0];
-          const ki = sc.indexOf("=");
-          if (ki > -1) {
-            const k = sc.substring(0, ki).trim();
-            const v = sc.substring(ki + 1).trim();
-            if (k === "XSRF-TOKEN" || k === "ivas_sms_session") {
-              updateCookie(k, v);
-            }
-          }
-        });
-      }
-
-      let chunks = [];
-      res.on("data", d => chunks.push(d));
-      res.on("end", () => {
-        let buf = Buffer.concat(chunks);
-        try {
-          const enc = res.headers["content-encoding"];
-          if (enc === "gzip") buf = zlib.gunzipSync(buf);
-          else if (enc === "br") buf = zlib.brotliDecompressSync(buf);
-        } catch {}
-
-        const text = buf.toString("utf-8");
-
-        if (res.statusCode === 401 || res.statusCode === 419 ||
-            text.includes('"message":"Unauthenticated"')) {
-          return reject(new Error("SESSION_EXPIRED"));
-        }
-
-        resolve({ status: res.statusCode, body: text });
-      });
-    });
-
-    req.on("error", reject);
-    if (body) req.write(body);
-    req.end();
-  });
 }
 
 /* ================= FETCH _token FROM PORTAL ================= */
@@ -157,13 +167,9 @@ async function fetchToken() {
   return match ? match[1] : null;
 }
 
-/* ================= PARSE HELPERS (unchanged) ================= */
-function stripHTML(html) {
-  return (html || "").replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim();
-}
-
+/* ================= PARSE SMS MESSAGES ================= */
 function parseSMSMessages(html, range, number, date) {
-  const rows  = [];
+  const rows = [];
   const clean = t => (t || "")
     .replace(/<[^>]+>/g, "")
     .replace(/&lt;/g, "<").replace(/&gt;/g, ">")
@@ -175,21 +181,13 @@ function parseSMSMessages(html, range, number, date) {
     const row = trM[1];
     if (row.includes("<th")) continue;
     const senderM = row.match(/class="cli-tag"[^>]*>([^<]+)</);
-    const sender  = senderM ? senderM[1].trim() : "SMS";
-    const msgM   = row.match(/class="msg-text"[^>]*>([\s\S]*?)<\/div>/i);
+    const sender = senderM ? senderM[1].trim() : "SMS";
+    const msgM = row.match(/class="msg-text"[^>]*>([\s\S]*?)<\/div>/i);
     const message = msgM ? clean(msgM[1]) : "";
     const timeM = row.match(/class="time-cell"[^>]*>\s*([0-9:]+)\s*</);
-    const time  = timeM ? timeM[1].trim() : "00:00:00";
+    const time = timeM ? timeM[1].trim() : "00:00:00";
     if (message) {
-      rows.push([
-        `${date} ${time}`,
-        range,
-        number,
-        sender,
-        message,
-        "$",
-        0
-      ]);
+      rows.push([`${date} ${time}`, range, number, sender, message, "$", 0]);
     }
   }
   return rows;
@@ -197,7 +195,7 @@ function parseSMSMessages(html, range, number, date) {
 
 /* ================= GET NUMBERS ================= */
 async function getNumbers(token) {
-  const ts   = Date.now();
+  const ts = Date.now();
   const path = `/portal/numbers?draw=1`
     + `&columns[0][data]=number_id&columns[0][name]=id&columns[0][orderable]=false`
     + `&columns[1][data]=Number`
@@ -211,33 +209,33 @@ async function getNumbers(token) {
     + `&start=0&length=5000&search[value]=&_=${ts}`;
 
   const resp = await makeRequest("GET", path, null, null, {
-    "Referer":      `${BASE_URL}/portal/numbers`,
-    "Accept":       "application/json, text/javascript, */*; q=0.01",
+    "Referer": `${BASE_URL}/portal/numbers`,
+    "Accept": "application/json, text/javascript, */*; q=0.01",
     "X-CSRF-TOKEN": token
   });
 
   const json = safeJSON(resp.body);
   if (!json || !json.data) return json;
   const aaData = json.data.map(row => [
-    row.range  || "",
+    row.range || "",
     "",
     String(row.Number || ""),
     "Weekly",
     ""
   ]);
   return {
-    sEcho:              2,
-    iTotalRecords:      String(json.recordsTotal || aaData.length),
+    sEcho: 2,
+    iTotalRecords: String(json.recordsTotal || aaData.length),
     iTotalDisplayRecords: String(json.recordsFiltered || aaData.length),
     aaData
   };
 }
 
-/* ================= GET SMS ================= */
+/* ================= GET SMS (multi-step) ================= */
 async function getSMS(token) {
-  const today    = getToday();
+  const today = getToday();
   const boundary = "----WebKitFormBoundary6I2Js7TBhcJuwIqw";
-  const ua       = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36";
+  const ua = USER_AGENT;
 
   const parts = [
     `--${boundary}\r\nContent-Disposition: form-data; name="from"\r\n\r\n${today}`,
@@ -282,16 +280,14 @@ async function getSMS(token) {
     }
   }
   return {
-    sEcho:                1,
-    iTotalRecords:        String(allRows.length),
+    sEcho: 1,
+    iTotalRecords: String(allRows.length),
     iTotalDisplayRecords: String(allRows.length),
-    aaData:               allRows
+    aaData: allRows
   };
 }
 
 /* ================= ROUTES ================= */
-
-// Main API
 router.get("/", async (req, res) => {
   const { type } = req.query;
   if (!type) return res.json({ error: "Use ?type=numbers or ?type=sms" });
@@ -300,30 +296,36 @@ router.get("/", async (req, res) => {
     const token = await fetchToken();
     if (!token) {
       return res.status(401).json({
-        error: "Session expired",
-        fix:   "POST /api/ivasms/update-session with xsrf and session cookies"
+        error: "Session expired or Cloudflare blocked",
+        fix: "Check logs – may need fresh cookies or proxy"
       });
     }
     if (type === "numbers") return res.json(await getNumbers(token));
-    if (type === "sms")     return res.json(await getSMS(token));
+    if (type === "sms") return res.json(await getSMS(token));
     res.json({ error: "Invalid type. Use numbers or sms" });
   } catch (err) {
     if (err.message === "SESSION_EXPIRED") {
       return res.status(401).json({
-        error: "Session expired — update cookies",
-        fix:   "POST /api/ivasms/update-session with xsrf and session"
+        error: "Session expired — update cookies (Cloudflare may require fresh browser login)",
+        fix: "Log into ivasms.com in a real browser, then restart this service (cookies will auto-save)"
+      });
+    }
+    if (err.message === "CLOUDFLARE_BLOCKED") {
+      return res.status(403).json({
+        error: "Cloudflare is blocking this request",
+        fix: "The site has enabled strong bot protection. Consider using a proxy service or headless browser."
       });
     }
     res.status(500).json({ error: err.message });
   }
 });
 
-// Raw debug endpoint (unchanged)
+// Raw debug endpoint (optional, uses same makeRequest)
 router.get("/raw-sms", async (req, res) => {
   try {
-    const token    = await fetchToken();
-    const today    = getToday();
-    const ua       = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36";
+    const token = await fetchToken();
+    const today = getToday();
+    const ua = USER_AGENT;
     const boundary = "----WebKitFormBoundary6I2Js7TBhcJuwIqw";
     const parts = [
       `--${boundary}\r\nContent-Disposition: form-data; name="from"\r\n\r\n${today}`,
@@ -349,37 +351,38 @@ router.get("/raw-sms", async (req, res) => {
     const r3 = await makeRequest("POST", "/portal/sms/received/getsms/number/sms",
       new URLSearchParams({ _token: token, start: today, end: today, Number: number, Range: range }).toString(),
       "application/x-www-form-urlencoded",
-      { "Referer": `${BASE_URL}/portal/sms/received`, "Accept": "text/html, */*; q=0.01", "User-Agent": ua }
+      { "Referer": `${BASE_URL}/portal/sms/received`, "Accept": "text/html, */*; q=0.01`, "User-Agent": ua }
     );
     res.set("Content-Type", "text/plain");
     res.send(`Range: ${range}\nNumber: ${number}\n\n` + r3.body.substring(0, 5000));
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// Update session endpoint (now persists to disk)
-router.post("/update-session", express.json(), (req, res) => {
-  const { xsrf, session } = req.body || {};
-  if (!xsrf || !session) {
-    return res.status(400).json({
-      error: "Required: xsrf and session",
-      example: { xsrf: "XSRF-TOKEN value", session: "ivas_sms_session value" }
-    });
+// Manual cookie update endpoint – now just triggers a save (cloudscraper manages cookies automatically)
+router.post("/update-session", express.json(), async (req, res) => {
+  // Because cloudscraper uses its own jar, we can optionally force a fresh login by clearing jar and making a request.
+  // But for simplicity, we'll just try to fetch token to validate.
+  try {
+    const token = await fetchToken();
+    if (token) {
+      return res.json({ success: true, message: "Session is active (cloudscraper auto-manages cookies)" });
+    } else {
+      return res.status(401).json({ error: "Still expired – try logging in from a real browser and restart this service" });
+    }
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
-  updateCookie("XSRF-TOKEN", xsrf);
-  updateCookie("ivas_sms_session", session);
-  console.log("✅ [IVAS] Cookies updated and saved to disk");
-  res.json({ success: true, message: "Cookies updated and persisted!" });
 });
 
-// Check session status
+// Status endpoint
 router.get("/status", async (req, res) => {
   try {
     const token = await fetchToken();
     res.json({
-      status:    token ? "✅ Session active" : "❌ Session expired",
-      hasToken:  !!token,
-      cookieKeys: Object.keys(COOKIES),
-      storagePath: COOKIE_FILE
+      status: token ? "✅ Session active" : "❌ Session expired",
+      hasToken: !!token,
+      cookieJarFile: COOKIE_JAR_FILE,
+      note: "Cloudscraper automatically manages cookies. If expired, visit ivasms.com in a real browser, then restart the service."
     });
   } catch (e) {
     res.json({ status: "❌ Session expired", error: e.message });
