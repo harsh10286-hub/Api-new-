@@ -3,7 +3,8 @@ FROM ghcr.io/puppeteer/puppeteer:21.0.0
 WORKDIR /app
 
 COPY package*.json ./
-RUN npm ci
+# Use npm install instead of npm ci (since no lockfile)
+RUN npm install
 
 COPY . .
 
