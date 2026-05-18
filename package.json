@@ -1,0 +1,12 @@
+{
+  "name": "ivasms-api",
+  "version": "1.0.0",
+  "description": "IVASMS scraper API with persistent cookies (Railway ready)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2"
+  }
+}
