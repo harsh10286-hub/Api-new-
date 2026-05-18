@@ -4,7 +4,6 @@ const StealthPlugin = require("puppeteer-extra-plugin-stealth");
 const fs = require("fs");
 const path = require("path");
 
-// Enable stealth mode to look like a real browser
 puppeteer.use(StealthPlugin());
 
 const router = express.Router();
@@ -14,7 +13,29 @@ const BASE_URL = "https://www.ivasms.com";
 const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36";
 const COOKIE_FILE = process.env.COOKIE_JAR_PATH || "/data/puppeteer_cookies.json";
 
-// Global browser and page (single instance)
+// Your fresh cookies (extracted from browser)
+const MY_COOKIES = [
+  {
+    name: "XSRF-TOKEN",
+    value: "eyJpdiI6IisxeS9FSnBJNldQenlRMzNUNjNSQ0E9PSIsInZhbHVlIjoiOTZmR2I0OVRqaEhZb2JaNVU3OXpWdkN6RFhLL2xraTh2ZmxQU1poUmdZd0M0Y01vZWNyaTZFaGkrYjZWOWhyOFl3Zy9URng2dCtuKzZ0M29UeG9YM0VpdEJ6VTNFN0JnQ2U5YmhrVWxSRVp5UkZLRER4N2lqUlk3UFBHZGk0UnUiLCJtYWMiOiI3MzE4NDNlYTI5YzkwY2Q2NWFlMGY0MzUyYzBkZDg4MWQ4MjRmZDM5ODY5MWY3ZmNjYzZiZTZlZTVmZDM3M2MyIiwidGFnIjoiIn0%3D",
+    domain: "www.ivasms.com",
+    path: "/",
+    httpOnly: false,
+    secure: false,
+    sameSite: "lax"
+  },
+  {
+    name: "ivas_sms_session",
+    value: "eyJpdiI6Imt4NWZ4WWxPV2FEcTlqNEpranFUc1E9PSIsInZhbHVlIjoiSkt5b00rb3l2OGc4STRiYUczbzZjWFhjWWE2YnZWNU9UODdGRXprSmhCMGtrM3Y4TVdzd1lNQnR2djdHVklaMVlmZDZ5WjJqSTVZV09uWHdhU1JxK0JGcTQwZVdFaDExT2pNZ2RUc1kzWVRreFk4SEV6Tk1sZ2tXVkladWx3Y0siLCJtYWMiOiI1NzdjYzkxMWI5NzUzM2I1NmMzOTU0YTFkZmM3Njg1NjU3NmMzNjk5ODE4ZTQ4MzMzZTMxY2Y3ZDQ5MGEyZmM5IiwidGFnIjoiIn0%3D",
+    domain: "www.ivasms.com",
+    path: "/",
+    httpOnly: true,
+    secure: false,
+    sameSite: "lax"
+  }
+];
+
+// Global browser and page
 let browser = null;
 let page = null;
 
@@ -39,22 +60,32 @@ async function getBrowserPage() {
   await page.setViewport({ width: 1280, height: 800 });
 
   // Load existing cookies from disk (if any)
+  let loadedCookies = false;
   if (fs.existsSync(COOKIE_FILE)) {
     try {
       const cookies = JSON.parse(fs.readFileSync(COOKIE_FILE, "utf8"));
       await page.setCookie(...cookies);
       console.log("[IVAS] Loaded cookies from disk");
+      loadedCookies = true;
     } catch (err) {
       console.error("[IVAS] Failed to load cookies:", err.message);
     }
   }
 
-  // Optional: navigate to the portal once to solve Cloudflare
-  // This will run the challenge and store cf_clearance cookie
-  console.log("[IVAS] Navigating to portal to solve Cloudflare challenge (may take 10-20s)...");
+  // Inject your fresh cookies (overwrites any old ones)
+  for (const cookie of MY_COOKIES) {
+    await page.setCookie(cookie);
+  }
+  console.log("[IVAS] Injected your fresh login cookies");
+
+  // Save the combined cookie jar to disk
+  await saveCookies(page);
+
+  // Now navigate to portal – this will solve Cloudflare challenge if needed
+  console.log("[IVAS] Navigating to portal (solving Cloudflare if necessary)...");
   await page.goto(BASE_URL + "/portal", { waitUntil: "networkidle2", timeout: 60000 });
   await saveCookies(page);
-  console.log("[IVAS] Cloudflare challenge solved, cookies saved");
+  console.log("[IVAS] Cloudflare challenge solved / portal loaded");
 
   return page;
 }
@@ -67,12 +98,11 @@ async function saveCookies(page) {
   console.log("[IVAS] Cookies saved to disk");
 }
 
-// ---------- HTTP request using Puppeteer (supports GET/POST, any content type) ----------
+// ---------- HTTP request using Puppeteer ----------
 async function makeRequest(method, path, body = null, contentType = null, extraHeaders = {}) {
   const url = BASE_URL + path;
   const page = await getBrowserPage();
 
-  // Set extra headers for this request
   await page.setExtraHTTPHeaders({
     "User-Agent": USER_AGENT,
     "Accept": "*/*",
@@ -84,17 +114,16 @@ async function makeRequest(method, path, body = null, contentType = null, extraH
   if (method === "GET") {
     const response = await page.goto(url, { waitUntil: "networkidle2", timeout: 30000 });
     const bodyText = await response.text();
-    // Save any new cookies (e.g., from redirects)
     await saveCookies(page);
     return { status: response.status(), body: bodyText };
   }
 
-  // For POST requests, use page.evaluate to perform fetch (avoids navigation)
+  // POST request using page.evaluate
   const result = await page.evaluate(async (url, method, body, contentType, headers) => {
     const fetchOptions = {
       method,
       headers: { "Content-Type": contentType, ...headers },
-      credentials: "include"   // send cookies
+      credentials: "include"
     };
     if (body) fetchOptions.body = body;
     const res = await fetch(url, fetchOptions);
@@ -104,13 +133,11 @@ async function makeRequest(method, path, body = null, contentType = null, extraH
     };
   }, url, method, body, contentType, extraHeaders);
 
-  // Cookies might have been updated via Set-Cookie in the POST response
-  // Puppeteer automatically updates its cookie jar, so we save them again
   await saveCookies(page);
   return result;
 }
 
-/* ================= HELPERS (unchanged from original logic) ================= */
+/* ================= HELPERS ================= */
 function getToday() {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
@@ -204,7 +231,6 @@ async function getSMS(token) {
     `--${boundary}--`
   ].join("\r\n");
 
-  // Step 1: Get ranges
   const r1 = await makeRequest(
     "POST", "/portal/sms/received/getsms", parts,
     `multipart/form-data; boundary=${boundary}`,
@@ -257,7 +283,7 @@ router.get("/", async (req, res) => {
     if (!token) {
       return res.status(401).json({
         error: "Session expired or Cloudflare blocked",
-        fix: "Check logs – may need fresh browser session"
+        fix: "Check logs – may need fresh cookies"
       });
     }
     if (type === "numbers") return res.json(await getNumbers(token));
@@ -308,20 +334,18 @@ router.get("/raw-sms", async (req, res) => {
   }
 });
 
-// Manual cookie update – forces a fresh Cloudflare solve
+// Force refresh: close browser, reopen, re‑solve Cloudflare
 router.post("/update-session", express.json(), async (req, res) => {
   try {
-    // Close existing browser to force a fresh start
     if (browser) await browser.close();
     browser = null;
     page = null;
-    // Re‑initialise (will solve challenge again)
-    await getBrowserPage();
+    await getBrowserPage(); // will inject cookies and solve challenge
     const token = await fetchToken();
     if (token) {
-      return res.json({ success: true, message: "Session refreshed and active" });
+      res.json({ success: true, message: "Session refreshed" });
     } else {
-      return res.status(401).json({ error: "Still expired – try again" });
+      res.status(401).json({ error: "Still expired – check cookies" });
     }
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -335,14 +359,14 @@ router.get("/status", async (req, res) => {
       status: token ? "✅ Session active" : "❌ Session expired",
       hasToken: !!token,
       cookieFile: COOKIE_FILE,
-      note: "Puppeteer manages Cloudflare challenges automatically"
+      note: "Puppeteer solves Cloudflare, your fresh cookies injected"
     });
   } catch (e) {
     res.json({ status: "❌ Session expired", error: e.message });
   }
 });
 
-// Graceful shutdown (optional)
+// Graceful shutdown
 process.on("SIGTERM", async () => {
   if (browser) await browser.close();
   process.exit(0);
